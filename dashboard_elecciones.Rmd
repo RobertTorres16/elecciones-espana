@@ -1,0 +1,672 @@
+---
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r install_deps, include=FALSE}
+if (!require("remotes")) install.packages("remotes")
+if (!require("infoelectoral")) remotes::install_github("rOpenSpain/infoelectoral")
+```
+
+```{r, include = FALSE}
+library(tidyverse)
+library(infoelectoral)
+library(plotly)
+library(stringr) 
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(lubridate)
+library(scales)
+library(mapSpain)
+library(sf)
+library(crosstalk)
+library(htmltools)
+```
+
+```{r Codigos provincias, include = FALSE}
+load('codigos_provincias.RData')
+codigos_provincias <- get(ls()[1])
+
+# Limpiamos y formateamos códigos a texto "01", "02"...
+provincias <- codigos_provincias |>
+  select(codigo_provincia, nombre_oficial = provincia) |>
+  mutate(codigo_provincia = sprintf("%02d", as.numeric(codigo_provincia))) |>
+  distinct(codigo_provincia, .keep_all = TRUE)
+```
+
+```{r Descarga de datos, include = FALSE}
+lista_elecciones <- data.frame(
+  anyo = c(1977, 1979, 1982, 1986, 1989, 1993, 1996, 2000, 2004, 2008, 2011, 2015, 2016, 2019, 2019, 2023),
+  mes  = c("06", "03", "10", "06", "10", "06", "03", "03", "03", "03", "11", "12", "06", "04", "11", "07")
+)
+
+elecciones <- data.frame()
+print("Iniciando descarga... ")
+
+for(i in 1:nrow(lista_elecciones)) {
+  anyo_i <- lista_elecciones$anyo[i]
+  mes_i  <- lista_elecciones$mes[i]
+  print(paste("Procesando:", anyo_i, "-", mes_i, "..."))
+  
+  tryCatch({
+    df_raw <- municipios(tipo_eleccion = "congreso", anno = anyo_i, mes = mes_i)
+    col_siglas <- if("siglas" %in% names(df_raw)) "siglas" else "nombre"
+    
+    df_prov <- df_raw |>
+      group_by(codigo_provincia, siglas = .data[[col_siglas]]) |>
+      summarise(votos = sum(votos), .groups = 'drop') |>
+      mutate(
+        anno = anyo_i,
+        mes = mes_i,
+        codigo_provincia = sprintf("%02d", as.numeric(codigo_provincia)) 
+      )
+    elecciones <- bind_rows(elecciones, df_prov)
+  }, error = function(e) { print(paste("ERROR en", anyo_i)) })
+}
+```
+
+
+```{r Limpieza, include = FALSE}
+clean_siglas <- function(x) {
+  x |> toupper() |>
+    gsub("Á", "A", x = _) |> gsub("É", "E", x = _) |> gsub("Í", "I", x = _) |>
+    gsub("Ó", "O", x = _) |> gsub("Ú", "U", x = _) |> gsub("Ü", "U", x = _) |> gsub("Ç", "C", x = _) |>
+    gsub("´", "'", x = _) |> gsub("`", "'", x = _) |> 
+    gsub("\\.", "", x = _) |> gsub("[\\(\\)˝\"]", "", x = _) |> 
+    gsub("-", " ", x = _) |> # Convierte "C-UPC" en "C UPC"
+    trimws()
+}
+
+df_clean <- elecciones |>
+  mutate(codigo_provincia = sprintf("%02d", as.numeric(codigo_provincia))) |>
+  left_join(provincias, by = "codigo_provincia") |>
+  mutate(siglas_temp = clean_siglas(siglas)) |>
+  
+  mutate(siglas_unificadas = case_when(
+    
+    # Correciones exactas
+    # SORIA 2023: "SY" es Soria ¡Ya!
+    grepl("^SY$", siglas_temp) ~ "ESPANA_VACIADA",
+    
+    # CANARIAS 1979: "C UPC" es Unión del Pueblo Canario
+    # (Al limpiar quitamos el guion de C-UPC)
+    grepl("UPC", siglas_temp) & codigo_provincia %in% c("35", "38") ~ "CC_NC",
+    
+    # NAVARRA 1977: LA FRAGMENTACIÓN
+    # UNAI (Unión Navarra de Izquierdas) -> Entorno Abertzale
+    grepl("^UNAI$", siglas_temp) ~ "BILDU_HB",
+    # AFN (Alianza Foral Navarra) -> Derecha Foralista (PP/UPN)
+    grepl("^AFN$", siglas_temp) ~ "PP",
+    # UAN (Unión Autonomista) -> PNV
+    grepl("^UAN$", siglas_temp) ~ "PNV",
+    
+    # MELILLA: GIL y UPM
+    grepl("^GIL", siglas_temp) ~ "GIL_POPULISMO",
+    # PP-UPM (Unión del Pueblo Melillense) va al PP
+    grepl("UPM", siglas_temp) ~ "PP", 
+
+    # PAÍS VASCO 1977 (Independientes democristianos afines al PNV)
+    grepl("^INDEP", siglas_temp) & anno == 1977 & codigo_provincia %in% c("01", "20", "48", "31") ~ "PNV",
+    
+    # CASTELLÓN 1977 (CIC = Marca blanca UCD)
+    grepl("^CIC$", siglas_temp) ~ "UCD_CDS",
+
+    # Bloques generales
+
+    # SOCIALISTA
+    grepl("PSOE|PSC|PSE|PSDEG|^PSP ", siglas_temp) ~ "PSOE",
+    
+    # DERECHA (PP)
+    grepl("^PP|^AP|^CP|^CD$|^AP |^CP |UPN|NA\\+|NA SUMA", siglas_temp) ~ "PP",
+    grepl("PARTIDO POPULAR|ALIANZA POPULAR", siglas_temp) ~ "PP",
+
+    # EXTREMA DERECHA
+    grepl("^VOX", siglas_temp) ~ "VOX",
+    grepl("^FE$|^FE |^FALANGE|^FUERZANUEVA|^FN$|^UN$|^UN |FJONS", siglas_temp) ~ "EXTREMA_DERECHA_ANTIGUA",
+
+    # NUEVA IZQUIERDA / SUMAR / PODEMOS
+    grepl("PODEMOS|SUMAR|UNIDAS|COMUNS|MAREA|COMPROMIS|MASPAIS|MAS PAIS|MAS MADRID|CHA|^EQ |ECP|GUANYEM|EN COMU|MES COMPROM|^UPV$|^BLOC|^EQUO", siglas_temp) ~ "SUMAR_PODEMOS",
+    
+    # IZQUIERDA HISTÓRICA / COMUNISTA / ABERTZALE
+    # Incluye AET (Carlistas de Montejurra 77)
+    grepl("IU|PCE|PCPE|ICV|^IC |^IC$|^ICEV|^EUPV|^EU PV|COMUNISTA|LCR|MC$|LKI|EMK|PTE|ORT|PST|^PSUC|^MUC|^PCC$|^FDI$|^EU$|^EUIA|^AET$", siglas_temp) ~ "IU_PCE_HISTORICO",
+    # Izquierda Abertzale (Bildu, HB, EH, EE, ESB, ANV)
+    grepl("BILDU|SORTU|AMAIUR|^HB$|^EH$|HERRI BATASUNA|EUSKAL HERRITARROK|^EE$|EUSKADIKO EZKERRA|^ESB$|^ANV$|^DCV$", siglas_temp) ~ "BILDU_HB",
+    
+    # VERDES
+    grepl("VERDES|ECOLOGISTAS|^LV$|^LVE|^ECOLOG", siglas_temp) ~ "VERDES_ECOLOGISTAS",
+
+    # CENTRO
+    grepl("CIUDADANOS|^CS$|^C S|^C'S", siglas_temp) ~ "CIUDADANOS",
+    grepl("UPYD", siglas_temp) ~ "UPYD",
+    grepl("UCD|CDS|^CDL|^PRD$|UNION DE CENTRO", siglas_temp) ~ "UCD_CDS",
+
+    # 2. NACIONALISMOS (CANDADOS GEOGRÁFICOS)
+
+    # CATALUÑA (08, 17, 25, 43)
+    grepl("CIU|^CDC|^JUNTS|^PDECAT|^DL$|^PDC|^JXCAT|^PDPC|^UDC|^FDC", siglas_temp) & codigo_provincia %in% c("08","17","25","43") ~ "JUNTS_CIU",
+    grepl("^ERC|^ESQUERRA|^REP|^EC FED|^ERFN|^ENTESA", siglas_temp) ~ "ERC",
+    grepl("^CUP|FRONT REPUB", siglas_temp) ~ "CUP",
+
+    # PAÍS VASCO / NAVARRA
+    grepl("PNV|^EAJ", siglas_temp) ~ "PNV",
+    grepl("GBAI|GEROA|NABAI|NAFARROA BAI|^NB$|NA BAI", siglas_temp) ~ "GEROA_BAI",
+    grepl("^EA$|^EA EUE", siglas_temp) ~ "EA",
+
+    # GALICIA
+    grepl("BNG|BNPG", siglas_temp) ~ "BNG",
+    grepl("^CG$|COALICION GALEGA", siglas_temp) ~ "COALICION_GALEGA",
+
+    # CANARIAS (35, 38)
+    grepl("^CC$|^CC |^NC$|NUEVACANARIAS|^AIC$|UPCAN|^CCA", siglas_temp) & codigo_provincia %in% c("35","38") ~ "CC_NC",
+    
+    # CANTABRIA
+    grepl("^PRC$|REGIONALISTA DE CANTABRIA", siglas_temp) ~ "PRC_CANTABRIA",
+
+    # OTROS
+    grepl("^UV$", siglas_temp) ~ "UNIO_VALENCIANA",
+    grepl("^PA$|^PSA ", siglas_temp) ~ "PARTIDO_ANDALUCISTA",
+    grepl("^PAR$", siglas_temp) ~ "PAR_ARAGON",
+    grepl("TERUELEXISTE|^EXISTE$|SORIA YA", siglas_temp) ~ "ESPANA_VACIADA",
+
+    # PARCHES
+    grepl("^FAC$|^FORO$", siglas_temp) ~ "FORO_ASTURIAS",
+    grepl("^UPL$", siglas_temp) ~ "UPL_LEON",
+
+    # CAJÓN DE SASTRE
+    TRUE ~ "OTROS"
+  )) |>
+  # Filtro anti-zombis (UCD muere en el 2000)
+  mutate(siglas_unificadas = ifelse(siglas_unificadas == "UCD_CDS" & anno > 2000, "OTROS", siglas_unificadas)) |>
+  select(-siglas_temp)
+
+# PASO 5: COMPACTACIÓN FINAL
+
+df_final <- df_clean |>
+  # 1. Sumar votos de siglas que van al mismo grupo (ej: PNV + UAN = PNV Total)
+  group_by(anno, mes, codigo_provincia, nombre_oficial, siglas_unificadas) |>
+  summarise(votos = sum(votos), .groups = 'drop') |>
+  # 2. Recalcular % perfectos
+  group_by(anno, codigo_provincia) |>
+  mutate(
+    total_votos_prov = sum(votos),
+    porcentaje = round((votos / total_votos_prov) * 100, 2)
+  ) |>
+  ungroup() |>
+  arrange(anno, nombre_oficial, desc(votos))
+```
+
+```{r Guardar datos, include = FALSE}
+write.csv(df_final, "final_master.csv", row.names = FALSE)
+```
+
+```{r Gráfico eolvución principales partidos, include = FALSE}
+# Preparar datos
+df_nacional_pct <- df_final |>
+  mutate(fecha_real = as.Date(paste(anno, mes, "01", sep="-"))) |>
+  group_by(fecha_real, siglas_unificadas) |>
+  summarise(votos_totales = sum(votos), .groups = 'drop') |>
+  group_by(fecha_real) |>
+  mutate(pct_nacional = votos_totales / sum(votos_totales)) |>
+  ungroup() |>
+  filter(siglas_unificadas %in% c("PSOE", "PP", "UCD_CDS", "SUMAR_PODEMOS", 
+                                  "VOX", "CIUDADANOS", "IU_PCE_HISTORICO"))
+
+# Colores
+colores_partidos <- c(
+  "PSOE" = "#E30613", "PP" = "#0054A6", "UCD_CDS" = "#E89B00",
+  "SUMAR_PODEMOS" = "#672F6C", "VOX" = "#63BE21", "CIUDADANOS" = "#EB6109",
+  "IU_PCE_HISTORICO" = "#8B0000")
+
+# Ajuste de datos
+df_plot_clean <- df_nacional_pct |>
+  mutate(
+    pct_nacional = case_when(
+      siglas_unificadas == "SUMAR_PODEMOS" & fecha_real < as.Date("2015-01-01") ~ NA_real_,
+      siglas_unificadas == "CIUDADANOS" & fecha_real < as.Date("2009-01-01") ~ NA_real_,
+      siglas_unificadas == "IU_PCE_HISTORICO" & fecha_real > as.Date("2016-01-01") ~ NA_real_,
+      siglas_unificadas == "UCD_CDS" & fecha_real > as.Date("1996-01-01") ~ NA_real_,
+      siglas_unificadas == "VOX" & fecha_real < as.Date("2017-01-01") ~ NA_real_,
+      pct_nacional == 0 ~ NA_real_,
+      TRUE ~ pct_nacional
+    )
+  ) |>
+  filter(!is.na(pct_nacional)) |>
+  mutate(tooltip_text = paste0(
+    "<b>Fecha: </b>", format(fecha_real, "%Y-%m"), "<br>",
+    "<b>Partido: </b>", siglas_unificadas, "<br>",
+    "<b>%: </b>", scales::percent(pct_nacional, accuracy = 0.1)
+  ))
+
+# Gráfico (Leyenda reactivada)
+g_nacional_obj <- ggplot(df_plot_clean, aes(x = fecha_real, y = pct_nacional, color = siglas_unificadas, group = siglas_unificadas, text = tooltip_text)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = colores_partidos, na.value = "grey50") + 
+  scale_x_date(date_breaks = "4 years", date_labels = "'%y") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), 
+                     limits = c(0, NA)) +
+  theme_minimal() +
+  theme(
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank(),
+  ) +
+  labs(title = "Evolución de los grandes partidos Nacionales", x = "", y = "% Voto Nacional", color = "Partidos")
+```
+
+```{r, Mapa interactivo, include = FALSE}
+# Diccionario de colores
+colores_partidos_full <- c(
+  "PSOE"="#E30613", "PP"="#0054A6", "VOX"="#63BE21", "SUMAR_PODEMOS"="#672F6C", 
+  "CIUDADANOS"="#EB6109", "UCD_CDS"="#008F4C", "IU_PCE_HISTORICO"="#8B0000", 
+  "PNV"="#008000", "BILDU_HB"="#B5CF18", "JUNTS_CIU"="#2E2E5C", "ERC"="#FFB232", 
+  "SIN_DATOS" = "#FF0000"
+)
+
+meses_es <- c("Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+              "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre")
+
+# Obtenemos códigos oficiales
+codigos_oficiales <- esp_get_prov(moveCAN = FALSE)$cpro
+
+# Preparación de datos
+df_ganadores <- df_final |>
+  mutate(mes = stringr::str_pad(mes, 2, pad = "0")) |>
+  group_by(anno, mes, codigo_provincia) |>
+  arrange(desc(votos)) |> 
+  slice(1) |> 
+  ungroup() |>
+  mutate(
+    periodo_label = paste0(anno, "-", mes),
+    periodo_texto = paste0(anno, " (", meses_es[as.numeric(mes)], ")")
+  ) |>
+  # Fallan dos provincias donde gana el PSOE, por ello rellenamos los huecos
+  complete(
+    nesting(anno, mes, periodo_label, periodo_texto),
+    codigo_provincia = codigos_oficiales,
+    fill = list(siglas_unificadas = "SIN_DATOS", porcentaje = 0, nombre_oficial = "Sin datos")
+  )
+
+# Mapa y unión
+mapa_spain <- esp_get_prov(moveCAN = TRUE) |>
+  mutate(codigo_provincia = as.character(cpro)) |> 
+  select(codigo_provincia, geometry)
+
+sf_mapa_final <- mapa_spain |>
+  left_join(df_ganadores, by = "codigo_provincia") |>
+  arrange(periodo_label, codigo_provincia) |>
+  # Limpieza post-join por seguridad
+  mutate(
+    siglas_unificadas = replace_na(siglas_unificadas, "SIN_DATOS"),
+    porcentaje = replace_na(porcentaje, 0)
+  ) |>
+  ungroup() 
+
+# Cálculo de color
+sf_mapa_final$porcentaje <- as.numeric(sf_mapa_final$porcentaje)
+
+sf_mapa_final_color <- sf_mapa_final |>
+  rowwise() |>
+  mutate(
+    lookup_color = colores_partidos_full[as.character(siglas_unificadas)],
+    color_base = ifelse(is.na(lookup_color), "#FF0000", lookup_color),
+    
+    # Transparencia mapa
+    alpha_val = scales::rescale(porcentaje, to = c(0.4, 1), from = c(0, 60)), 
+    alpha_val = pmin(alpha_val, 1),
+    # Forzamos opacidad total si no hay datos para que se vea bien el rojo
+    alpha_val = if_else(siglas_unificadas == "SIN_DATOS", 1, alpha_val),
+    
+    color_final = scales::alpha(color_base, alpha_val)
+  ) |>
+  ungroup()
+
+# Orden de leyenda
+sf_mapa_final_color$siglas_unificadas <- factor(
+  sf_mapa_final_color$siglas_unificadas, 
+  levels = names(colores_partidos_full)
+)
+
+# Gráfico
+p <- ggplot(sf_mapa_final_color) +
+  
+  geom_sf(aes(fill = I(color_final), 
+              group = codigo_provincia,  
+              frame = periodo_label,
+              text = paste0(
+                "<b>", nombre_oficial, "</b>",
+                "<br>Elección: ", periodo_texto,
+                "<br>Partido: ", siglas_unificadas,
+                "<br>Voto: ", round(porcentaje, 1), "%"
+              )), 
+          size = 0.05, color = "white") +
+  
+  # Leyenda de los partidos
+  geom_point(aes(x = -15, y = 35, color = siglas_unificadas), 
+             alpha = 1, 
+             size = 2) +
+  
+  scale_color_manual(values = colores_partidos_full, 
+                     name = "Partido Ganador", 
+                     drop = FALSE) +
+  
+  guides(color = guide_legend(override.aes = list(size = 5, shape = 15))) +
+  
+  theme_void() +
+  labs(title = "Partido con mayor número de votos por provincia") +
+  theme(legend.position = "right") 
+
+# Renderizado
+mapa_animado <- ggplotly(p, tooltip = "text") |>
+  animation_opts(
+    frame = 1000, 
+    transition = 0, 
+    redraw = TRUE 
+  ) |>
+  animation_slider(currentvalue = list(prefix = "Fecha: ")) |>
+  layout(
+    legend = list(
+      orientation = "v",
+      x = 1.05,
+      y = 0.5,
+      xanchor = "left",
+      yanchor = "middle",
+      font = list(size = 10),
+      itemclick = FALSE,
+      itemdoubleclick = FALSE
+    ),
+    margin = list(r = 150, l = 10, b = 50, t = 50)
+  )
+
+mapa_animado
+
+```
+
+
+```{r Independentismo, include = FALSE}
+# Códigos de provincias
+codigos_cat <- c("08", "17", "25", "43")
+codigos_pv_nav <- c("01", "20", "48", "31")
+
+# Calcular el total de votos por bloque regional (Denominador)
+df_totales_region <- df_final |>
+  mutate(Region = case_when(
+    codigo_provincia %in% codigos_cat ~ "Nacionalismo Catalán",
+    codigo_provincia %in% codigos_pv_nav ~ "Nac. Vasco / Navarro",
+    TRUE ~ NA_character_
+  )) |>
+  filter(!is.na(Region)) |>
+  group_by(anno, mes, Region) |>
+  summarise(votos_totales_region = sum(votos), .groups = 'drop')
+
+# Calcular votos de los partidos nacionalistas (Numerador)
+df_votos_nacionalistas <- df_final |>
+  mutate(Region = case_when(
+    codigo_provincia %in% codigos_cat ~ "Nacionalismo Catalán",
+    codigo_provincia %in% codigos_pv_nav ~ "Nac. Vasco / Navarro",
+    TRUE ~ NA_character_
+  )) |>
+  filter(!is.na(Region)) |>
+  mutate(bloque = case_when(
+      siglas_unificadas %in% c("JUNTS_CIU", "ERC", "CUP") ~ "Nacionalismo Catalán",
+      siglas_unificadas %in% c("PNV", "BILDU_HB", "EA", "GEROA_BAI") ~ "Nac. Vasco / Navarro",
+      TRUE ~ NA_character_
+  )) |>
+  filter(!is.na(bloque)) |>
+  filter(Region == bloque) |> 
+  group_by(anno, mes, Region) |>
+  summarise(votos_nacionalistas = sum(votos), .groups = 'drop')
+
+# Unir y calcular porcentaje real sobre la comunidad
+df_grafico_indep <- df_votos_nacionalistas |>
+  left_join(df_totales_region, by = c("anno", "mes", "Region")) |>
+  mutate(
+    fecha_real = as.Date(paste(anno, mes, "01", sep="-")),
+    porcentaje = votos_nacionalistas / votos_totales_region,
+    tooltip_text = paste0(
+      "<b>Fecha: </b>", format(fecha_real, "%Y-%m"), "<br>",
+      "<b>Bloque: </b>", Region, "<br>",
+      "<b>%: </b>", scales::percent(porcentaje, accuracy = 0.1), " (en la región)"
+    )
+  ) |>
+  arrange(fecha_real)
+
+# Gráfico
+indep_obj = ggplot(df_grafico_indep, aes(x = fecha_real, y = porcentaje, color = Region, group = Region, text = tooltip_text)) +
+  geom_line(linewidth = 1.3, alpha = 0.8) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Nacionalismo Catalán" = "#cebc0b", "Nac. Vasco / Navarro" = "#009543")) +
+  scale_x_date(date_breaks = "4 years", date_labels = "'%y") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), 
+                     limits = c(0, NA)) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Fuerza del voto Nacionalista e independentista",
+    subtitle = "% sobre el total de su comunidad",
+    x = "",
+    y = "% Voto Regional"
+  )
+```
+
+```{r Top 5 provincia, include = FALSE}
+# 1. Preparar datos y ranking (Tu código original)
+df_rankings_all <- df_final |>
+  group_by(anno, nombre_oficial, siglas_unificadas) |>
+  summarise(votos = sum(votos, na.rm=TRUE), .groups = 'drop') |>
+  group_by(anno, nombre_oficial) |>
+  mutate(
+    pct = votos / sum(votos), 
+    ranking = rank(-votos)
+  ) |>
+  filter(ranking <= 5) |> 
+  arrange(desc(pct)) |> 
+  ungroup()
+
+# 2. Asignar colores VECTORIZADA (Tu código original)
+df_rankings_all$color_barra <- ifelse(
+  df_rankings_all$siglas_unificadas %in% names(colores_partidos_full),
+  colores_partidos_full[df_rankings_all$siglas_unificadas],
+  "#999999"
+)
+
+# 3. Crear objeto compartido (SharedData)
+# Le asignamos un grupo para asegurar que los filtros actúen sobre él
+sd_ranking <- SharedData$new(df_rankings_all, group = "ranking_party")
+
+# 4. Crear el gráfico (Tu código original con pequeños ajustes estéticos)
+p_barras_interactivo <- plot_ly(sd_ranking, x = ~pct, y = ~siglas_unificadas, 
+                                type = 'bar', orientation = 'h',
+                                text = ~paste0(round(pct*100, 1), "%"), 
+                                hoverinfo = "text+y",
+                                marker = list(color = ~color_barra)) |> 
+  layout(
+    title = list(text = "Top 5 Partidos", font = list(size=14)),
+    xaxis = list(title = "", tickformat = ".0%"), 
+    yaxis = list(title = "", categoryorder = "total ascending"), # Importante para reordenar
+    showlegend = FALSE, 
+    margin = list(t=40)
+  )
+
+# 5. Generar la Salida Final (Filtros + Gráfico en una sola vista)
+# No creamos objetos intermedios, ejecutamos directamente bscols
+bscols(
+  widths = c(3, 9), # 3 columnas para filtros, 9 para el gráfico
+  list(
+    filter_select("filtro_anno", "Selecciona Año", sd_ranking, ~anno, multiple = FALSE),
+    filter_select("filtro_prov", "Selecciona Provincia", sd_ranking, ~nombre_oficial, multiple = FALSE)
+  ),
+  p_barras_interactivo
+)
+```
+
+```{r ML clustering, include=FALSE}
+# --- MACHINE LEARNING 1: K-MEANS CLUSTERING ---
+# Objetivo: Agrupar provincias según su comportamiento de voto en las últimas elecciones (2023)
+
+set.seed(42) # Para reproducibilidad
+
+# Preparamos matriz: Provincias (filas) x Partidos (columnas) con % de voto en 2023
+df_2023 <- df_final |> 
+  filter(anno == 2023) |>
+  select(codigo_provincia, nombre_oficial, siglas_unificadas, porcentaje) |>
+  pivot_wider(
+    names_from = siglas_unificadas, 
+    values_from = porcentaje,
+    values_fill = 0
+  )
+
+# Extraemos solo las variables numéricas (porcentajes de partidos)
+data_ml <- df_2023 |> select(-codigo_provincia, -nombre_oficial)
+
+# K-Means con 4 clusters (probado empíricamente como buen resumen político)
+num_clusters <- 4
+kmeans_result <- kmeans(scale(data_ml), centers = num_clusters, nstart = 25)
+
+# Añadimos el cluster asignado al dataframe temporal
+df_2023$cluster <- as.factor(kmeans_result$cluster)
+
+# Renombramos clusters según patrones observados (opcional, dejaremos genérico por seguridad)
+# cluster_labels <- c("C1", "C2", "C3", "C4")
+# df_2023$cluster_nombre <- factor(df_2023$cluster, labels = cluster_labels)
+
+# Preparamos el mapa de clusters
+mapa_clusters_sf <- mapa_spain |>
+  left_join(df_2023, by = "codigo_provincia")
+
+# Gráfico del mapa de clusters
+p_clusters <- ggplot(mapa_clusters_sf) +
+  geom_sf(aes(fill = cluster,
+              text = paste0("<b>", nombre_oficial, "</b><br>Cluster: ", cluster)), 
+          color = "white", size = 0.1) +
+  scale_fill_brewer(palette = "Set1", name = "Perfil de Voto\n(K-Means)") +
+  theme_void() +
+  labs(title = "Agrupación de Provincias por Perfil de Voto (2023)") +
+  theme(legend.position = "bottom")
+
+p_clusters_interactivo <- ggplotly(p_clusters, tooltip = "text")
+```
+
+```{r ML PCA, include=FALSE}
+# --- MACHINE LEARNING 2: PCA (Análisis de Componentes Principales) ---
+# Objetivo: Encontrar las dimensiones ocultas que más explican las variaciones de voto
+
+pca_result <- prcomp(data_ml, scale. = TRUE)
+
+# Varianza explicada por los 2 primeros componentes
+var_explained <- round(pca_result$sdev^2 / sum(pca_result$sdev^2) * 100, 1)
+
+# Preparamos datos para el biplot usando ggplot/plotly
+# 1. Puntos (Provincias)
+pca_points <- as.data.frame(pca_result$x[, 1:2])
+pca_points$nombre <- df_2023$nombre_oficial
+pca_points$cluster <- df_2023$cluster
+
+# 2. Flechas (Cargas de los partidos/variables)
+pca_vars <- as.data.frame(pca_result$rotation[, 1:2])
+pca_vars$partido <- rownames(pca_vars)
+
+# Ajustamos escala de las flechas para que encajen visualmente con los puntos
+mult <- min(
+  (max(pca_points$PC1) - min(pca_points$PC1)/(max(pca_vars$PC1)-min(pca_vars$PC1))),
+  (max(pca_points$PC2) - min(pca_points$PC2)/(max(pca_vars$PC2)-min(pca_vars$PC2)))
+) * 0.7 
+
+pca_vars <- pca_vars |> mutate(PC1 = PC1 * mult, PC2 = PC2 * mult)
+
+# Gráfico PCA
+p_pca <- ggplot() +
+  # Puntos (provincias)
+  geom_point(data = pca_points, aes(x = PC1, y = PC2, color = cluster, 
+                                    text = paste("Provincia:", nombre)), size = 2, alpha = 0.7) +
+  # Flechas (partidos)
+  geom_segment(data = pca_vars, aes(x = 0, y = 0, xend = PC1, yend = PC2), 
+               arrow = arrow(length = unit(0.2, "cm")), color = "black", alpha = 0.5) +
+  geom_text(data = pca_vars, aes(x = PC1*1.1, y = PC2*1.1, label = partido), 
+            color = "black", size = 3) +
+  scale_color_brewer(palette = "Set1") +
+  theme_minimal() +
+  labs(
+    title = "PCA: Ejes Políticos Subyacentes (2023)",
+    x = paste0("Componente 1 (", var_explained[1], "% varianza)"),
+    y = paste0("Componente 2 (", var_explained[2], "% varianza)")
+  ) +
+  theme(legend.position = "none")
+
+p_pca_interactivo <- ggplotly(p_pca, tooltip = "text")
+```
+
+
+```{r Dashboard}
+# Estilo para ancho completo
+browsable(tags$style("
+  .main-container { max-width: 100% !important; width: 100% !important; padding: 0 15px !important; }
+"))
+
+# Bloque principal silenciado para evitar warnings en el HTML final
+suppressWarnings({
+  
+  # Convertir a interactivos (Aquí es donde se generan los warnings de escalas)
+  # Usamos tooltip="text" para usar tu texto personalizado
+  p_indep <- ggplotly(indep_obj, tooltip = "text") |> 
+    layout(legend = list(orientation = "v"))
+
+  p_nacional <- ggplotly(g_nacional_obj, tooltip = "text") |>
+    layout(legend = list(orientation = "v"))
+
+  p_mapa <- mapa_animado |> 
+    layout(legend = list(orientation = "h", x = 0.5, xanchor="center", y = -0.1))
+
+  # Montar el Grid
+  browsable(
+    tagList(
+      h2("Evolución Electoral en España y Análisis de Perfiles (1977 - 2023)", 
+         style = "text-align: center; font-family: sans-serif; margin: 15px 0; color: #333;"),
+      
+      div(
+        style = "display: grid; grid-template-columns: 45% 54%; grid-template-rows: 32% 32% 32%; gap: 1%; height: 1300px;",
+        
+        # --- FILA 1 ---
+        div(style = "grid-column: 1 / 2; grid-row: 1 / 2; border: 1px solid #ddd; padding: 5px; background: white;", 
+            p_indep),
+        
+        div(style = "grid-column: 2 / 3; grid-row: 1 / 2; border: 1px solid #ddd; padding: 5px; background: white;", 
+            p_mapa),
+        
+        # --- FILA 2 ---
+        div(style = "grid-column: 1 / 2; grid-row: 2 / 3; border: 1px solid #ddd; padding: 5px; background: white;", 
+            p_nacional),
+
+        # Panel de Filtros + Barras (Usamos los objetos del chunk anterior)
+        div(
+          style = "grid-column: 2 / 3; grid-row: 2 / 3; border: 1px solid #ddd; padding: 10px; background: white; display: flex; flex-direction: column;",
+          
+          # Filtros Crosstalk
+          div(style = "display: flex; gap: 10px; margin-bottom: 5px; background: #f9f9f9; padding: 5px; border-radius: 4px;",
+              div(style = "flex: 1;", filter_select("filtro_prov", "Provincia:", sd_ranking, ~nombre_oficial, multiple = FALSE)),
+              div(style = "flex: 1;", filter_select("filtro_anno", "Año:", sd_ranking, ~anno, multiple = FALSE))
+          ),
+          
+          # Gráfico Top 5
+          div(style = "flex-grow: 1;", p_barras_interactivo)
+        ),
+        
+        # --- FILA 3 (MACHINE LEARNING) ---
+        div(style = "grid-column: 1 / 2; grid-row: 3 / 4; border: 1px solid #ddd; padding: 5px; background: white;", 
+            p_pca_interactivo),
+        
+        div(style = "grid-column: 2 / 3; grid-row: 3 / 4; border: 1px solid #ddd; padding: 5px; background: white;", 
+            p_clusters_interactivo)
+      )
+    )
+  )
+})
+```

@@ -1,0 +1,17 @@
+# R temporary files
+.Rhistory
+.Rdata
+.RData
+.Rproj.user/
+*.Rproj
+
+# Large generated files
+dashboard_elecciones.html
+dashboard_elecciones_files/
+
+# Video (too large for GitHub)
+Storytelling Trabajo final Vis.mp4
+
+# OS files
+.DS_Store
+Thumbs.db
