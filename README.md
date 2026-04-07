@@ -1,8 +1,8 @@
-# 🗳️ Evolución Electoral en España (1977 – 2023)
+# Evolución Electoral en España (1977 – 2023)
 
 > Dashboard interactivo que analiza más de 45 años de historia electoral española, desde las primeras elecciones democráticas hasta las de 2023, combinando visualización de datos y técnicas de Machine Learning.
 
-## 📊 Características del Dashboard
+## Características del Dashboard
 
 El dashboard está construido en **R** utilizando `plotly` y `crosstalk` para máxima interactividad, e incluye **6 paneles principales**:
 
@@ -33,7 +33,7 @@ El proyecto incluye un exhaustivo proceso de limpieza y transformación:
 - **Limpieza de cadenas de texto**: normalización de acentos, signos de puntuación y codificación.
 - **Unificación de siglas**: agrupación de cientos de micro-partidos, marcas blancas y coaliciones temporales en bloques coherentes para permitir el análisis longitudinal (ej. AP/CP/PP, IU/PCE, espacios y escisiones).
 
-## 🚀 Cómo utilizar el proyecto
+## Cómo utilizar el proyecto
 
 ### Opción 1: Ver el Dashboard (Recomendado)
 
@@ -57,7 +57,3 @@ Descarga o clona el repositorio y abre `dashboard_elecciones.html` en cualquier 
 ├── codigos_provincias.RData            # Diccionario de datos para cruces geográficos
 └── README.md
 ```
-
-## 👨‍💻 Autor
-
-**Robert Torres** — [GitHub](https://github.com/RobertTorres16)
