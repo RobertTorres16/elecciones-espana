@@ -1,2 +1,3 @@
-# Mark generated HTML outputs as linguist-generated so GitHub shows R as the main language
+# Force GitHub to detect R as the primary language
+*.Rmd linguist-language=R
 *.html linguist-generated=true
